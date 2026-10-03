@@ -1,0 +1,2 @@
+# A-PRESTO-Embedding-Based-Framework-for-Rice-Non-Rice-Classification-and-Growth-Stage-Detection-
+A satellite-based machine learning pipeline for district-level rice classification and growth-stage analysis in Karnataka, India. Built to address the lack of timely, accurately labeled rice maps — a key bottleneck for agricultural planning, water management, yield prediction, and crop insurance — without relying on extensive manual field surveys.
