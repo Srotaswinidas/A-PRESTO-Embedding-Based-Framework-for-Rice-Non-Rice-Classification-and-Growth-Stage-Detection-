@@ -1,1 +1,68 @@
+Rice Classification
 
+Satellite-based rice vs. non-rice classification for Karnataka districts, using PRESTO embeddings and an MLP classifier. This is Stage 1 of a larger two-stage rice crop monitoring project — growth-stage analysis (Stage 2) is documented separately.
+
+Folder Structure
+rice_classification/
+├── TRAINING/
+│   ├── README.md
+│   ├── prepare_sequences.py
+│   ├── generate_embeddings.py
+│   └── train_mlp.py
+└── TESTING/
+    ├── README.md
+    ├── prepare_sequences_mandya.py
+    ├── prepare_sequences_tumakuru.py
+    ├── generate_embeddings_mandya.py
+    ├── generate_embeddings_tumakuru.py
+    ├── test_mlp_mandya.py
+    └── test_mlp_on_tumakuru.py
+
+TRAINING/ builds the model once, on the original Mandya fixed-point dataset. TESTING/ runs that already-trained model on new districts — nothing in TESTING/ re-trains or re-fits anything. See each folder's own README for script-by-script detail.
+
+Input Data
+
+Both TRAINING/ and TESTING/ consume CSVs exported from Google Earth Engine with this exact column set:
+
+system:index, B11, B12, B2, B3, B4, B5, B6, B7, B8, B8A, NDVI, VH, VV,
+dynamic_world, elevation, label, latitude, longitude, month, point_id,
+slope, temperature_2m, total_precipitation, year, .geo
+Column	Source	Notes
+B2–B8A, B11, B12	Sentinel-2 SR	Monthly median composite
+NDVI	Derived	(B8 - B4) / (B8 + B4), computed in GEE
+VH, VV	Sentinel-1 GRD	Monthly median composite, IW mode
+dynamic_world	Dynamic World V1	Monthly mode (most frequent land-cover class)
+elevation, slope	SRTM	Static, re-sampled per point
+temperature_2m, total_precipitation	ERA5-Land	Monthly mean/sum
+label	Rice reference map/asset	1 = rice, 0 = non-rice
+point_id	Fixed sample point	Same physical location every year (seeded stratifiedSample)
+year, month	Extraction loop	Kharif season months, per-year export
+latitude, longitude, .geo	Point geometry	.geo is GEE's auto-included geometry column on export
+system:index	GEE-generated	Auto row index — not the same as point_id, don't use it as a join key
+Pipeline (end to end)
+GEE extraction (JS)  -->  prepare_sequences*.py  -->  generate_embeddings*.py  -->  train_mlp.py  (TRAINING only)
+                                                                                 -->  test_mlp_*.py  (TESTING only)
+GEE extraction — JavaScript run in the Code Editor, exports one CSV per district per year with the columns above.
+prepare_sequences*.py — combines yearly CSVs into model-ready NumPy arrays (X.npy, y.npy, etc.), cleaning -9999 sentinels and interpolating gaps.
+generate_embeddings*.py — runs sequences through a fine-tuned PRESTO encoder, producing 128-dim embeddings.
+train_mlp.py (TRAINING only) — trains the rice/non-rice MLP on embeddings, saves the model + scaler.
+test_mlp_*.py (TESTING only) — loads the trained model + scaler, runs inference on a new district, applies a geographic plausibility mask, outputs predictions + maps.
+Requirements
+torch
+numpy
+pandas
+scikit-learn
+joblib
+matplotlib
+presto-worldcereal  # PRESTO encoder (https://github.com/WorldCereal/presto-worldcereal)
+
+Google Earth Engine access (authenticated account/project) is required for the feature extraction stage.
+
+Common Pitfalls (from actual debugging history)
+Reusing a data/processed_<district>/ folder across districts silently loads the wrong dataset — no error, just wrong-scale results (this already happened once with Tumakuru/Mandya). Always use a dedicated folder per district.
+EXPECTED_TIMESTEPS mismatch in prepare_sequences*.py filters out every point if the CSV's actual rows-per-point-year count doesn't match, producing an empty X.npy and a downstream IndexError with no clear error at the source.
+GEE district-name mismatches (e.g. 'Tumkur' vs 'Tumakuru' in the GAUL dataset) silently return zero features — the failure only surfaces later as an unrelated Image.clip: geometry must not be empty error.
+plt.show() under the Agg backend can hang indefinitely with no error in some environments — this pipeline's plotting code only uses savefig() + plt.close().
+Re-fitting the scaler on new district data instead of only .transform()-ing it silently shifts the feature distribution the model was trained on, with no error to flag it.
+
+See TRAINING/README.md and TESTING/README.md for per-script detail.
