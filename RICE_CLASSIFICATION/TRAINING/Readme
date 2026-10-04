@@ -1,1 +1,67 @@
+# Rice Classification — TRAINING
 
+Builds and trains the rice vs. non-rice MLP classifier on the original training district (Mandya's fixed 5K rice / 5K non-rice points, 2019–2023).
+
+## Pipeline
+
+```
+prepare_sequences.py  -->  generate_embeddings.py  -->  train_mlp.py
+  (CSV -> X.npy/y.npy)      (X.npy -> embeddings.npy)    (trains MLP)
+```
+
+Run in this order — each script reads the previous one's saved `.npy` output.
+
+## Input CSV columns
+
+`prepare_sequences.py` expects the raw GEE-exported CSVs to have exactly these columns:
+
+```
+system:index, B11, B12, B2, B3, B4, B5, B6, B7, B8, B8A, NDVI, VH, VV,
+dynamic_world, elevation, label, latitude, longitude, month, point_id,
+slope, temperature_2m, total_precipitation, year, .geo
+```
+
+`FEATURE_COLUMNS` in the script (the 17 bands actually fed to PRESTO) is a subset: `VV, VH, B2, B3, B4, B5, B6, B7, B8, B8A, B11, B12, NDVI, temperature_2m, total_precipitation, elevation, slope`. The remaining columns (`point_id`, `label`, `year`, `month`, `latitude`, `longitude`, `dynamic_world`, `.geo`, `system:index`) are metadata, not model input. Note `system:index` is GEE's auto-generated row index — it is **not** the same as `point_id` and should never be used as a join/grouping key.
+
+## Files
+
+### `prepare_sequences.py`
+Converts the yearly raw GEE-exported CSVs into model-ready NumPy arrays.
+- Loads all yearly CSVs, tags each `point_id` with its year (same physical point across different years = separate training example).
+- Replaces `-9999` sentinels with `NaN`, interpolates/fills remaining gaps, drops sequences exceeding the NaN threshold.
+- Filters to points with the expected timestep count (`EXPECTED_TIMESTEPS`) and consistent label across the sequence.
+- Saves: `X.npy`, `y.npy`, `point_ids.npy`, `location_ids.npy`, `latlons.npy`, `dws.npy`, `months.npy`, `nan_mask.npy` → `data/processed/`.
+
+### `generate_embeddings.py`
+Runs the prepared sequences through the fine-tuned PRESTO encoder.
+- Slices `X.npy` into PRESTO's input groups (S1: VV/VH, S2: 10 bands + NDVI, ERA5: temperature/precipitation, SRTM: elevation/slope).
+- Builds PRESTO's input tensor + mask via `construct_single_presto_input`.
+- Sanity-checks raw value ranges (S2 0–10000, temperature in Kelvin, NDVI in [-1,1]) before running the encoder.
+- Loads `models/presto_finetuned.pt` (falls back to generic pretrained weights with a printed warning if missing — check this doesn't fire unintentionally).
+- Saves `embeddings.npy` (N, 128) alongside `y.npy`, `point_ids.npy`, `location_ids.npy`, `latlons.npy` → `data/processed/`.
+
+### `train_mlp.py`
+Trains `RiceMLP` — a 3-hidden-layer feedforward network (`[256, 128, 64]`, BatchNorm + ReLU + dropout) on the embeddings.
+- Embeddings standardized via `StandardScaler`, fit on training data only.
+- Checkpoint stores `input_dim`/`hidden_dims`/`dropout` alongside weights, so TESTING scripts can rebuild the exact architecture without hardcoding.
+- Saves `models/mlp_rice_classifier.pt` and `models/mlp_scaler.joblib` — these two files are what every script in `TESTING/` depends on.
+
+## Output
+
+After running all three scripts, you should have:
+```
+data/processed/
+  X.npy, y.npy, point_ids.npy, location_ids.npy, latlons.npy, dws.npy, months.npy, nan_mask.npy
+  embeddings.npy
+models/
+  mlp_rice_classifier.pt
+  mlp_scaler.joblib
+```
+
+The two files in `models/` are what get consumed by every script in `TESTING/` — nothing in `TESTING/` re-trains or re-fits anything.
+
+## Before running
+
+- Update `INPUT_CSVS` in `prepare_sequences.py` to your actual raw CSV paths.
+- Set `EXPECTED_TIMESTEPS` to match your CSVs' actual rows-per-point-year (this is a common silent-failure point — a mismatch filters out every point and produces an empty downstream array with no clear error at the source).
+- Confirm `models/presto_finetuned.pt` exists before running `generate_embeddings.py`, or you'll silently fall back to un-fine-tuned PRESTO weights.
