@@ -1,1 +1,60 @@
+# Rice Classification — TESTING
 
+Runs the already-trained MLP classifier (from `TRAINING/`) on new districts — Mandya (re-run / validation) and Tumakuru (large-scale inference). Nothing in this folder trains or fits anything; every script here depends on `models/mlp_rice_classifier.pt` and `models/mlp_scaler.joblib` produced by `TRAINING/train_mlp.py`.
+
+## Pipeline (per district)
+
+```
+prepare_sequences_<district>.py  -->  generate_embeddings_<district>.py  -->  test_mlp_<district>.py
+```
+
+Each district gets its own three-script chain, writing to its own `data/processed_<district>/` folder — **never share this folder between districts**, since that's the single most common source of silently-wrong results in this pipeline (see Pitfalls below).
+
+## Input CSV columns
+
+Same format as `TRAINING/` — `prepare_sequences_mandya.py` / `prepare_sequences_tumakuru.py` expect:
+
+```
+system:index, B11, B12, B2, B3, B4, B5, B6, B7, B8, B8A, NDVI, VH, VV,
+dynamic_world, elevation, label, latitude, longitude, month, point_id,
+slope, temperature_2m, total_precipitation, year, .geo
+```
+
+For an unlabeled inference district (e.g. Tumakuru), `label` may be absent or all placeholder — the pipeline's `y.npy` fallback (`-1`) is what `test_mlp_on_tumakuru.py` checks to decide whether to compute metrics or skip to predictions-only.
+
+## Files
+
+### `prepare_sequences_mandya.py` / `prepare_sequences_tumakuru.py`
+Same logic as `TRAINING/prepare_sequences.py`, scoped to one district's raw CSVs. Outputs `X.npy`, `y.npy` (real labels for Mandya; `-1` placeholder for unlabeled Tumakuru points), `point_ids.npy`, `location_ids.npy`, `latlons.npy`, `dws.npy`, `months.npy` → that district's `data/processed_<district>/` folder.
+
+### `generate_embeddings_mandya.py` / `generate_embeddings_tumakuru.py`
+Same PRESTO embedding logic as `TRAINING/generate_embeddings.py`, run on that district's `X.npy`. **Must use the same fine-tuned PRESTO checkpoint and the same band order as training** — a mismatch here won't error, it'll just quietly produce embeddings the MLP was never trained to interpret correctly. Outputs `embeddings.npy` to the same `data/processed_<district>/` folder.
+
+### `test_mlp_mandya.py`
+Inference-only run on Mandya's ~10,000 fixed points.
+- Rebuilds `RiceMLP` from the checkpoint's stored config, loads weights, loads the training-fit scaler (`.transform()` only, never re-fit).
+- Output plot: **scatter** (appropriate at Mandya's scale — hexbin would look sparse at only 10K points).
+- Metrics (accuracy/precision/recall/F1/ROC-AUC/confusion matrix) computed automatically, since Mandya has real ground-truth labels.
+- Includes a scale sanity check on load — warns if point count is unexpectedly large (a sign `DATA_DIR` is still pointing at Tumakuru's folder by mistake).
+- Saves `mandya_predictions_mlp.csv`, `mandya_rice_vs_nonrice_map.png`.
+
+### `test_mlp_on_tumakuru.py`
+Inference-only run on Tumakuru's ~5.7M points.
+- Same model/scaler loading pattern as the Mandya script.
+- `embeddings.npy` is memory-mapped and processed in batches — the full ~5GB array (and a second scaled copy) is never held in RAM at once.
+- Output plot: **hexbin** (aggregated bins — a per-point scatter isn't practical at millions of points).
+- Geographic plausibility mask: overrides rice predictions to non-rice on implausible terrain (slope > 15°) or land cover (built-up, snow/ice), using `X.npy`/`dws.npy` from the same folder.
+- Metrics are skipped automatically if `y.npy` is all `-1` (no ground truth) — predictions and the map are still produced.
+- Saves `tumakuru_predictions_mlp.csv`, `tumakuru_rice_vs_nonrice_map.png`.
+
+## Pitfalls specific to this folder (from actual debugging history)
+
+- **Reusing one district's `data/processed_<district>/` folder for another district** silently loads the wrong embeddings/arrays — no error, just wrong-scale, wrong-location results. This already happened once (Tumakuru's ~5.7M-point data got read while intending to test Mandya). Always use a dedicated folder per district, and check the printed point count against what you expect before trusting any output.
+- **The geo-plausibility mask in `test_mlp_on_tumakuru.py` reads `X.npy`/`dws.npy` separately from `embeddings.npy`** — if you only copy/regenerate embeddings for a new district and leave an old district's `X.npy`/`dws.npy` sitting in the folder, the mask will silently veto predictions using the *wrong* district's terrain data.
+- **Scaler must only ever be `.transform()`'d**, never re-fit on a new district's embeddings — re-fitting silently shifts the distribution the model was trained on and makes its learned weights meaningless, with no error to indicate anything went wrong.
+
+## Before running
+
+- Confirm `models/mlp_rice_classifier.pt` and `models/mlp_scaler.joblib` exist (produced by `TRAINING/`).
+- Set `DATA_DIR` in each script to that district's dedicated processed folder.
+- For a brand-new district, run its `prepare_sequences_*.py` and `generate_embeddings_*.py` first — `test_mlp_*.py` only reads what those scripts already wrote.
